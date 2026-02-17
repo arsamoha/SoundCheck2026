@@ -6,7 +6,8 @@ dataDir = '/Users/trisha/Projects/SoundCheck/Verasonics_Testing/LinearArrayImage
 outputDir = '/Users/trisha/Projects/SoundCheck/Linear_Analysis/';  % results saved here
 
 %% Params
-threshold = 0.70;  % min acceptable brightness (set to 70% of max)
+threshold = 0.70;  % min acceptable brightness - green for heatmap
+minThreshold = 0.50; % yellow-red threshold for heatmap
 
 %% Get all .mat files in the directory
 matFiles = dir(fullfile(dataDir, '*.mat'));
@@ -25,7 +26,7 @@ for fileIdx = 1:numFiles
     filePath = fullfile(dataDir, fileName);
     fileNames{fileIdx} = fileName;
     
-    fprintf('\n[%d/%d] Processing: %s\n', fileIdx, numFiles, fileName);
+    %fprintf('\n[%d/%d] Processing: %s\n', fileIdx, numFiles, fileName);
     
     try
         % Load img data
@@ -43,8 +44,17 @@ for fileIdx = 1:numFiles
             warning('Using field %s as image data', fields{1});
         end
         
-        % Get img dimensions
+        % Get img dimensions and percent position for each column
         [numRows, numCols] = size(imgData);
+        fprintf('Processing %s: size(imgData) = [%d %d]\n', fileName, numRows, numCols); %TEST
+        assert(~isempty(imgData), 'imgData is empty'); %TEST
+        numCols = size(imgData, 2); %TEST
+        if numCols > 1
+            cols = 1:numCols;
+            distance = (cols - 1) ./ (numCols - 1) * 100;   % 0..100
+        else
+            distance = 0;  % single-column edge case
+        end
         
         %% Compute column-wise brightness scores (TODO: choose one)
         columnScore = mean(imgData, 1);   
@@ -53,31 +63,84 @@ for fileIdx = 1:numFiles
 
         %% Determine ref (max) brightness
         refBrightness = max(columnScore);
-        fprintf('  Reference brightness: %.2f \n', refBrightness);
+        %fprintf('  Reference brightness: %.2f \n', refBrightness);
         
         %% Calculate percent performance
         percentPerformance = (columnScore / refBrightness) * 100;
         percentPerRow = (double(imgData) ./ refBrightness) * 100; % percent performance per row for each column
 
-        % Store results
-        allColumnScores(fileIdx, :) = columnScore;
-        allPercentPerformance(fileIdx, :) = percentPerformance;
-        allPercentPerRow{fileIdx} = percentPerRow;
-
         %% ID dropout regions
         dropouts = find(percentPerformance < (threshold * 100));
         dropoutsAll{fileIdx} = dropouts; 
-        if ~isempty(dropouts)
-            fprintf('  WARNING: %d columns below %.0f%% threshold\n', ...
-                numel(dropouts), threshold * 100);
-            fprintf('  Column percent performance (for columns with dropout):\n');
-            for k = 1:numel(dropouts)
-                c = dropouts(k);
-                fprintf('    Col %d : %.1f%%\n', c, percentPerformance(c));
+
+        % Store numeric results
+        allColumnScores(fileIdx, :) = columnScore;
+        allPercentPerformance(fileIdx, :) = percentPerformance;
+        allPercentPerRow{fileIdx} = percentPerRow;
+        
+        % Signal loss
+        for rowIdx = 1:numRows
+            rowPct = percentPerRow(rowIdx, :);            
+            if ~isequal(size(rowPct), [1, numCols])
+                error('Row %d: unexpected rowPct size: %s', rowIdx, mat2str(size(rowPct)));
             end
-        else
-            fprintf('  All columns above threshold\n');
+        
+            dropMaskRow = rowPct < (threshold * 100);
+            droppedCols = find(dropMaskRow);      
+        
+            if isempty(droppedCols)
+                fprintf('[ Image %d/%d ] [ Row %d ] 0.0%% of the array has 0.0%% signal loss\n', ...
+                        fileIdx, numFiles, rowIdx);
+                continue;
+            end
+        
+            % Print signal loss across the array (for each column)
+            for k = 1:numel(droppedCols)
+                colIdx = droppedCols(k);
+                if numCols > 1
+                    arrayDistance = distance(colIdx);  
+                else
+                    arrayDistance = 0;
+                end
+                meanPerformance = rowPct(colIdx); 
+                signalLoss = 100 - meanPerformance;
+        
+                fprintf('[ Image %d/%d ] %.1f%% of the array has %.1f%% signal loss\n', ...
+                        fileIdx, numFiles, arrayDistance, signalLoss);
+            end
         end
+        
+        %% Heatmap
+        % RGB per column
+        barHeight = 12;
+        pct = percentPerformance / 100;
+
+        % Colors
+        redMask = pct < minThreshold;
+        yellowMask = pct >= minThreshold & pct < threshold;
+        greenMask = pct >= threshold;
+
+        % Build heatbar
+        barHeight = 20;
+        heatbar = zeros(barHeight, numel(pct), 3);
+        if any(redMask)
+            heatbar(:, redMask, :) = repmat(reshape([1 0 0],1,1,3), barHeight, sum(redMask));
+        end
+        if any(yellowMask)
+            heatbar(:, yellowMask, :) = repmat(reshape([1 1 0],1,1,3), barHeight, sum(yellowMask));
+        end
+        if any(greenMask)
+            heatbar(:, greenMask, :) = repmat(reshape([0 1 0],1,1,3), barHeight, sum(greenMask));
+        end
+
+        % Display with original image
+        figure('Name', fileName, 'NumberTitle', 'off');
+        subplot(2,1,1);
+        imagesc(imgData); colormap gray; axis image off; title('Image');
+        subplot(2,1,2);
+        imshow(heatbar); axis off;
+        title(sprintf('Column Performance: < %d%% (red), %d-%d%% (yellow), ≥ %d%% (green)', minThreshold*100, minThreshold*100, threshold*100, threshold*100));
+
     end
 end
 
@@ -86,21 +149,3 @@ resultsFile = fullfile(outputDir, 'analysis_results.mat');
 save(resultsFile, 'allColumnScores', 'allPercentPerformance', 'allPercentPerRow', 'fileNames', 'threshold');
 fprintf('Saved: analysis_results.mat\n');
 fprintf('Results saved to: %s\n', outputDir);
-
-% Summary
-fprintf('\nSummary of files with columns below %.0f%% threshold:\n', threshold*100);
-anyProblems = false;
-totalCols = size(allPercentPerformance, 2); % total columns (assumes consistent #cols across files)
-for f = 1:numFiles
-    cols = dropoutsAll{f};
-    if ~isempty(cols)
-        anyProblems = true;
-        fprintf('  %s : %d/%d columns below threshold -> cols: ', ...
-                fileNames{f}, numel(cols), totalCols);
-        fprintf('%d ', cols);
-        fprintf('\n');
-    end
-end
-if ~anyProblems
-    fprintf('  No files with columns below threshold\n');
-end
