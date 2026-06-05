@@ -5,7 +5,7 @@ clear
 
 
 
-load SoundCheckImageData_00050.mat
+load /Users/arshad.mohammad/Desktop/SoundCheck/SoundCheck2026/Data/Image_Scans/SoundCheckImageData_00050.mat
 
 
 
